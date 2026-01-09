@@ -1,0 +1,14 @@
+[screen]
+region = [ 820, 520, 300, 150,]
+
+[indicator]
+lower = [ 12, 2, 196,]
+upper = [ 32, 102, 255,]
+
+[bot]
+delay = 0.05
+mouse_button = "left"
+
+[control]
+dead_zone = 10
+
