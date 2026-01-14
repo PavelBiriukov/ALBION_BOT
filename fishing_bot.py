@@ -36,6 +36,9 @@ class FishingBot:
         self.retry_count = 0              # Счетчик попыток
         self.float_search_radius = 220    # Радиус быстрого поиска поплавка (пиксели)
         self.fast_red_window = 3.0        # Окно ускоренного поиска после заброса (сек)
+        codex-vex3wz
+        self.water_roi_margin = 50        # Отступ для ROI воды (пиксели)
+        self.last_water_contour = Non
         
         # Инициализируем кастер
         self.caster = FishingCaster()
@@ -171,11 +174,15 @@ class FishingBot:
 
         return cnt
     
-    def fast_detect_red(self, frame, roi=None):
+     codex-vex3wz
+    def fast_detect_red(self, frame, roi=None, mask=None):
+
         """Очень быстрый поиск красного без контуров"""
         x_offset = 0
         y_offset = 0
         roi_frame = frame
+        roi_mask = mask
+
 
         if roi is not None:
             x1, y1, x2, y2 = roi
@@ -185,10 +192,18 @@ class FishingBot:
             x_offset = x1
             y_offset = y1
 
+            if roi_mask is not None:
+                roi_mask = roi_mask[y1:y2, x1:x2]
+
+
         scale = 1.0
         if roi_frame.shape[0] > 400 or roi_frame.shape[1] > 400:
             scale = 0.5
             roi_frame = cv2.resize(roi_frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+            if roi_mask is not None:
+                roi_mask = cv2.resize(roi_mask, (roi_frame.shape[1], roi_frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+
 
         hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
 
@@ -200,6 +215,8 @@ class FishingBot:
         mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
         mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask = cv2.bitwise_or(mask1, mask2)
+        if roi_mask is not None:
+            mask = cv2.bitwise_and(mask, roi_mask)
 
         ys, xs = np.where(mask > 0)
         if len(xs) == 0:
@@ -226,6 +243,54 @@ class FishingBot:
         y2 = min(int(last_point[1] + radius), height)
 
         return (x1, y1, x2, y2)
+
+
+    def get_water_search_mask(self, frame_shape):
+        """ROI и маска воды для ускоренного поиска."""
+        if self.last_water_contour is None:
+            return None, None
+
+        x, y, w, h = cv2.boundingRect(self.last_water_contour)
+        height, width = frame_shape[:2]
+        margin = self.water_roi_margin
+        x1 = max(x - margin, 0)
+        y1 = max(y - margin, 0)
+        x2 = min(x + w + margin, width)
+        y2 = min(y + h + margin, height)
+
+        if x2 <= x1 or y2 <= y1:
+            return None, None
+
+        contour = self.last_water_contour.astype(np.int32)
+        contour[:, 0, 0] -= x1
+        contour[:, 0, 1] -= y1
+        mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+
+        return (x1, y1, x2, y2), mask
+
+    def get_fast_search_roi(self, frame_shape):
+        """Возвращает ROI и маску для ускоренного поиска поплавка."""
+        cast_roi = self.get_float_search_roi(frame_shape)
+        water_roi, water_mask = self.get_water_search_mask(frame_shape)
+
+        if cast_roi and water_roi:
+            x1 = max(cast_roi[0], water_roi[0])
+            y1 = max(cast_roi[1], water_roi[1])
+            x2 = min(cast_roi[2], water_roi[2])
+            y2 = min(cast_roi[3], water_roi[3])
+            if x2 <= x1 or y2 <= y1:
+                return cast_roi, None
+            roi = (x1, y1, x2, y2)
+            if water_mask is None:
+                return roi, None
+            return roi, water_mask[y1 - water_roi[1]:y2 - water_roi[1], x1 - water_roi[0]:x2 - water_roi[0]]
+
+        if cast_roi:
+            return cast_roi, None
+        if water_roi:
+            return water_roi, water_mask
+        return None, None
     
     def detect_red_in_water(self, frame, water_contour):
         water_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -423,8 +488,10 @@ class FishingBot:
 
             red_found = False
             if time_since_cast < self.float_search_timeout:
-                search_roi = self.get_float_search_roi(frame.shape)
-                fast_red = self.fast_detect_red(frame, roi=search_roi)
+
+                search_roi, search_mask = self.get_fast_search_roi(frame.shape)
+                fast_red = self.fast_detect_red(frame, roi=search_roi, mask=search_mask)
+
                 if fast_red:
                     red_found = True
                     # сохраняем позицию поплавка (в координатах кадра)
@@ -536,6 +603,7 @@ class FishingBot:
                 if water is not None:
                     # Обновляем кастер
                     self.caster.set_water_contour(water)
+                    self.last_water_contour = water
                     
                     # Отображаем воду
                     cv2.drawContours(water_area_display, [water], -1, (100, 100, 255), -1)
@@ -547,8 +615,10 @@ class FishingBot:
                     red_mask = None
 
                     if time_since_cast < self.fast_red_window:
-                        search_roi = self.get_float_search_roi(frame.shape)
-                        fast_red = self.fast_detect_red(frame, roi=search_roi)
+
+                        search_roi, search_mask = self.get_fast_search_roi(frame.shape)
+                        fast_red = self.fast_detect_red(frame, roi=search_roi, mask=search_mask)
+
                         if fast_red:
                             red_position = (fast_red[0], fast_red[1], 8, 8)
                             self.red_position = red_position
