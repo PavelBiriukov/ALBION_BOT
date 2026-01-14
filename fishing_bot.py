@@ -34,6 +34,8 @@ class FishingBot:
         self.float_search_timeout = 5     # Через сколько секунд перезабросить (5 сек)
         self.max_retry_attempts = 3       # Максимальное количество попыток перезаброса
         self.retry_count = 0              # Счетчик попыток
+        self.float_search_radius = 220    # Радиус быстрого поиска поплавка (пиксели)
+        self.fast_red_window = 3.0        # Окно ускоренного поиска после заброса (сек)
         
         # Инициализируем кастер
         self.caster = FishingCaster()
@@ -169,9 +171,26 @@ class FishingBot:
 
         return cnt
     
-    def fast_detect_red(self, frame):
+    def fast_detect_red(self, frame, roi=None):
         """Очень быстрый поиск красного без контуров"""
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        x_offset = 0
+        y_offset = 0
+        roi_frame = frame
+
+        if roi is not None:
+            x1, y1, x2, y2 = roi
+            if x2 <= x1 or y2 <= y1:
+                return None
+            roi_frame = frame[y1:y2, x1:x2]
+            x_offset = x1
+            y_offset = y1
+
+        scale = 1.0
+        if roi_frame.shape[0] > 400 or roi_frame.shape[1] > 400:
+            scale = 0.5
+            roi_frame = cv2.resize(roi_frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+        hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
 
         lower_red1 = np.array([0, 120, 70])
         upper_red1 = np.array([10, 255, 255])
@@ -186,7 +205,27 @@ class FishingBot:
         if len(xs) == 0:
             return None
 
-        return (int(xs.mean()), int(ys.mean()))
+        center_x = int(xs.mean() / scale) + x_offset
+        center_y = int(ys.mean() / scale) + y_offset
+        return (center_x, center_y)
+
+    def get_float_search_roi(self, frame_shape):
+        """ROI для ускоренного поиска поплавка рядом с последней точкой заброса."""
+        if not self.caster.last_cast_points:
+            return None
+
+        last_point = self.caster.last_cast_points[-1]
+        if last_point is None:
+            return None
+
+        height, width = frame_shape[:2]
+        radius = self.float_search_radius
+        x1 = max(int(last_point[0] - radius), 0)
+        y1 = max(int(last_point[1] - radius), 0)
+        x2 = min(int(last_point[0] + radius), width)
+        y2 = min(int(last_point[1] + radius), height)
+
+        return (x1, y1, x2, y2)
     
     def detect_red_in_water(self, frame, water_contour):
         water_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -383,8 +422,9 @@ class FishingBot:
             time_since_cast = current_time - self.last_cast_time
 
             red_found = False
-            if time_since_cast < 1.5:
-                fast_red = self.fast_detect_red(frame)
+            if time_since_cast < self.float_search_timeout:
+                search_roi = self.get_float_search_roi(frame.shape)
+                fast_red = self.fast_detect_red(frame, roi=search_roi)
                 if fast_red:
                     red_found = True
                     # сохраняем позицию поплавка (в координатах кадра)
@@ -506,8 +546,9 @@ class FishingBot:
                     time_since_cast = time.time() - self.last_cast_time
                     red_mask = None
 
-                    if time_since_cast < 1.5:
-                        fast_red = self.fast_detect_red(frame)
+                    if time_since_cast < self.fast_red_window:
+                        search_roi = self.get_float_search_roi(frame.shape)
+                        fast_red = self.fast_detect_red(frame, roi=search_roi)
                         if fast_red:
                             red_position = (fast_red[0], fast_red[1], 8, 8)
                             self.red_position = red_position
@@ -520,7 +561,11 @@ class FishingBot:
                             if self.state == "WAITING_FLOAT":
                                 self.state = "TRACKING_FLOAT"
                                 self.float_found_time = time.time()
-
+                        else:
+                            reds, red_mask = self.detect_red_in_water(frame, water)
+                            if reds:
+                                red_position = self.get_main_red_position(reds)
+                                self.red_position = red_position
                     else:
                         reds, red_mask = self.detect_red_in_water(frame, water)
                         if reds:
