@@ -38,6 +38,7 @@ class FishingBot:
         self.fast_red_window = 3.0        # Окно ускоренного поиска после заброса (сек)
         self.water_roi_margin = 50        # Отступ для ROI воды (пиксели)
         self.last_water_contour = None
+
         
         # Инициализируем кастер
         self.caster = FishingCaster()
@@ -115,12 +116,12 @@ class FishingBot:
         return cnt
     
     def fast_detect_red(self, frame, roi=None, mask=None):
+
         """Очень быстрый поиск красного без контуров"""
         x_offset = 0
         y_offset = 0
         roi_frame = frame
         roi_mask = mask
-
         if roi is not None:
             x1, y1, x2, y2 = roi
             if x2 <= x1 or y2 <= y1:
@@ -130,7 +131,6 @@ class FishingBot:
             y_offset = y1
             if roi_mask is not None:
                 roi_mask = roi_mask[y1:y2, x1:x2]
-
         scale = 1.0
         if roi_frame.shape[0] > 400 or roi_frame.shape[1] > 400:
             scale = 0.5
@@ -176,7 +176,6 @@ class FishingBot:
         y2 = min(int(last_point[1] + radius), height)
 
         return (x1, y1, x2, y2)
-
     def get_water_search_mask(self, frame_shape):
         """ROI и маска воды для ускоренного поиска."""
         if self.last_water_contour is None:
@@ -546,6 +545,7 @@ class FishingBot:
                     if time_since_cast < self.fast_red_window:
                         search_roi, search_mask = self.get_fast_search_roi(frame.shape)
                         fast_red = self.fast_detect_red(frame, roi=search_roi, mask=search_mask)
+
                         if fast_red:
                             red_position = (fast_red[0], fast_red[1], 8, 8)
                             self.red_position = red_position
