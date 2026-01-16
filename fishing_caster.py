@@ -67,10 +67,12 @@ class FishingCaster:
             print(f"⚠️  Не удалось отпустить кнопку мыши: {e}")
             return False
     
-    def get_center_area_point(self):
+    def get_center_area_point(self, frame_shape):
         """Получает точку в центральной области воды (в радиусе 1/3 от центра)"""
-        if self.water_contour is None:
+        if self.water_contour is None or frame_shape is None:
             return None
+
+        height, width = frame_shape[:2]
             
         # Получаем центр воды
         M = cv2.moments(self.water_contour)
@@ -87,14 +89,14 @@ class FishingCaster:
         radius = min(w, h) // 3
         
         # Создаем маску воды
-        mask = np.zeros((1080, 1920), dtype=np.uint8)
+        mask = np.zeros((height, width), dtype=np.uint8)
         cv2.drawContours(mask, [self.water_contour], -1, 255, -1)
         
         # Ищем точки в центральной области
         center_points = []
         
         # Проверяем несколько случайных точек в радиусе
-        for _ in range(100):  # Пробуем 100 раз найти точку
+        for _ in range(200):  # Пробуем 200 раз найти точку
             # Генерируем точку в круге радиуса radius
             angle = random.uniform(0, 2 * math.pi)
             distance = random.uniform(0, radius * 0.8)  # 80% от радиуса чтобы точно внутри
@@ -102,12 +104,12 @@ class FishingCaster:
             py = int(center_y + distance * math.sin(angle))
             
             # Проверяем, что точка в воде
-            if 0 <= px < 1920 and 0 <= py < 1080:
+            if 0 <= px < width and 0 <= py < height:
                 if mask[py, px] == 255:
                     center_points.append((px, py))
                     
                     # Если нашли достаточно точек, выбираем случайную
-                    if len(center_points) >= 20:
+                    if len(center_points) >= 30:
                         break
         
         if center_points:
@@ -116,10 +118,12 @@ class FishingCaster:
         # Если не нашли точки в центральной области, возвращаем центр
         return (center_x, center_y)
     
-    def get_far_corner_point(self):
+    def get_far_corner_point(self, frame_shape):
         """Получает точку в дальнем углу воды, но не слишком близко к краю"""
-        if self.water_contour is None:
+        if self.water_contour is None or frame_shape is None:
             return None
+
+        height, width = frame_shape[:2]
             
         # Получаем bounding box воды
         x, y, w, h = cv2.boundingRect(self.water_contour)
@@ -136,11 +140,11 @@ class FishingCaster:
         
         # Проверяем, какие углы внутри воды
         valid_corners = []
-        mask = np.zeros((1080, 1920), dtype=np.uint8)
+        mask = np.zeros((height, width), dtype=np.uint8)
         cv2.drawContours(mask, [self.water_contour], -1, 255, -1)
         
         for corner in corners:
-            if 0 <= corner[0] < 1920 and 0 <= corner[1] < 1080:
+            if 0 <= corner[0] < width and 0 <= corner[1] < height:
                 if mask[corner[1], corner[0]] == 255:
                     valid_corners.append(corner)
         
@@ -148,12 +152,12 @@ class FishingCaster:
             return random.choice(valid_corners)
         
         # Если углы не подходят, берем точку из центральной области
-        return self.get_center_area_point()
+        return self.get_center_area_point(frame_shape)
     
     def get_deep_spot_point(self, frame):
         """Находит предполагаемо глубокое место, но в центральной области"""
         if self.water_contour is None or frame is None:
-            return self.get_center_area_point()
+            return self.get_center_area_point(frame.shape if frame is not None else None)
             
         # Создаем маску воды
         mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -162,7 +166,7 @@ class FishingCaster:
         # Получаем центр воды
         M = cv2.moments(self.water_contour)
         if M["m00"] == 0:
-            return self.get_center_area_point()
+            return self.get_center_area_point(frame.shape)
             
         center_x = int(M["m10"] / M["m00"])
         center_y = int(M["m01"] / M["m00"])
@@ -196,7 +200,7 @@ class FishingCaster:
                     return (points_x[idx], points_y[idx])
         
         # Если не нашли темные участки, берем точку из центральной области
-        return self.get_center_area_point()
+        return self.get_center_area_point(frame.shape)
     
     def get_center_point(self):
         """Получает точный центр воды"""
@@ -214,6 +218,7 @@ class FishingCaster:
     
     def choose_cast_point(self, frame=None):
         """Выбирает точку для заброса - в основном центральную область"""
+        frame_shape = frame.shape if frame is not None else None
         cast_type = random.choices(
             list(self.cast_types.keys()),
             weights=list(self.cast_types.values())
@@ -222,26 +227,26 @@ class FishingCaster:
         print(f"🎯 Тип заброса: {cast_type}")
         
         if cast_type == "center_area":
-            point = self.get_center_area_point()
+            point = self.get_center_area_point(frame_shape) if frame_shape else self.get_center_point()
         elif cast_type == "center_water":
             point = self.get_center_point()
         elif cast_type == "far_corner":
-            point = self.get_far_corner_point()
+            point = self.get_far_corner_point(frame_shape) if frame_shape else self.get_center_point()
         elif cast_type == "deep_spot":
-            point = self.get_deep_spot_point(frame)
+            point = self.get_deep_spot_point(frame) if frame is not None else self.get_center_point()
         else:
-            point = self.get_center_area_point()  # По умолчанию центральная область
+            point = self.get_center_area_point(frame_shape) if frame_shape else self.get_center_point()  # По умолчанию центральная область
         
         # Если не удалось получить точку, используем центральную область
         if point is None:
-            point = self.get_center_area_point()
+            point = self.get_center_area_point(frame_shape) if frame_shape else self.get_center_point()
         
         # Избегаем недавние точки (но с меньшей строгостью)
         if point and len(self.last_cast_points) > 0:
             for last_point in self.last_cast_points[-2:]:
                 if last_point and self.distance(point, last_point) < 30:  # 30px минимальное расстояние
                     # Слишком близко к предыдущей точке, берем другую центральную точку
-                    point = self.get_center_area_point()
+                    point = self.get_center_area_point(frame_shape) if frame_shape else self.get_center_point()
                     break
         
         # Добавляем в историю
@@ -274,11 +279,19 @@ class FishingCaster:
             # Очень сильная: 0.75 - 0.8 секунды
             return random.uniform(0.75, self.cast_power_max)
     
-    def smart_cast(self, screen_region, frame=None, game_crop_offset=(100, 150)):
+    def smart_cast(self, screen_region, frame=None, game_region=None):
         """Умный заброс с акцентом на центр воды"""
         if self.water_contour is None:
             return False
-        
+
+        if game_region is None:
+            game_crop_offset = (100, 150)
+        else:
+            game_crop_offset = (
+                game_region["left"] - screen_region["left"],
+                game_region["top"] - screen_region["top"]
+            )
+
         try:
             # Отпускаем кнопку мыши
             self.ensure_mouse_released()
@@ -341,13 +354,21 @@ class FishingCaster:
             self.ensure_mouse_released()
             return False
     
-    def simple_cast(self, screen_region, game_crop_offset=(100, 150)):
+    def simple_cast(self, screen_region, game_region=None):
         """Простой заброс (обратная совместимость) - всегда в центр"""
-        return self.smart_cast(screen_region, None, game_crop_offset)
-    def rescue_cast(self, screen_region, game_crop_offset=(100, 150)):
+        return self.smart_cast(screen_region, None, game_region=game_region)
+    def rescue_cast(self, screen_region, game_region=None):
         """Спасательный заброс - всегда в центр с хорошей силой"""
         if self.water_contour is None:
             return False
+
+        if game_region is None:
+            game_crop_offset = (100, 150)
+        else:
+            game_crop_offset = (
+                game_region["left"] - screen_region["left"],
+                game_region["top"] - screen_region["top"]
+            )
         
         try:
             # Отпускаем кнопку мыши
@@ -394,51 +415,6 @@ class FishingCaster:
             self.ensure_mouse_released()
             return False
           
-    def cast_to_point(self, screen_region, target_point, power=None, game_crop_offset=(100, 150)):
-        """
-        Заброс в конкретную точку (x,y) ВНУТРИ cropped game_frame.
-        target_point: (x,y) в координатах frame после crop
-        power: если None — берём get_random_power()
-        """
-        if self.water_contour is None or target_point is None:
-            return False
-    
-        try:
-            self.ensure_mouse_released()
-    
-            target_x, target_y = target_point
-    
-            screen_x = screen_region["left"] + game_crop_offset[0] + int(target_x)
-            screen_y = screen_region["top"] + game_crop_offset[1] + int(target_y)
-    
-            original_pos = pyautogui.position()
-    
-            pyautogui.moveTo(screen_x, screen_y, duration=0.2)
-            time.sleep(0.05)
-    
-            cast_power = float(power) if power is not None else float(self.get_random_power())
-    
-            # гарантируем отпускание
-            for _ in range(2):
-                pyautogui.mouseUp(button="left")
-                time.sleep(0.02)
-    
-            pyautogui.mouseDown(button="left")
-            time.sleep(cast_power)
-            pyautogui.mouseUp(button="left")
-    
-            # доп. отпускания
-            for _ in range(2):
-                pyautogui.mouseUp(button="left")
-                time.sleep(0.02)
-    
-            pyautogui.moveTo(original_pos, duration=0.15)
-            return True
-    
-        except Exception as e:
-            print(f"❌ Ошибка cast_to_point: {e}")
-            self.ensure_mouse_released()
-            return False
     def _point_in_water(self, pt):
         """Проверка: точка внутри water_contour"""
         if self.water_contour is None or pt is None:
@@ -446,14 +422,22 @@ class FishingCaster:
         x, y = int(pt[0]), int(pt[1])
         return cv2.pointPolygonTest(self.water_contour, (x, y), False) >= 0
 
-    def cast_to_point(self, screen_region, target_point, game_crop_offset=(100, 150)):
+    def cast_to_point(self, screen_region, target_point, power=None, game_region=None):
         """Заброс в конкретную точку (если она в воде), иначе fallback на обычный"""
-        if self.water_contour is None:
+        if self.water_contour is None or target_point is None:
             return False
+
+        if game_region is None:
+            game_crop_offset = (100, 150)
+        else:
+            game_crop_offset = (
+                game_region["left"] - screen_region["left"],
+                game_region["top"] - screen_region["top"]
+            )
 
         if not self._point_in_water(target_point):
             # точка не в воде — обычный заброс
-            return self.smart_cast(screen_region, frame=None, game_crop_offset=game_crop_offset)
+            return self.smart_cast(screen_region, frame=None, game_region=game_region)
 
         try:
             self.ensure_mouse_released()
@@ -467,7 +451,7 @@ class FishingCaster:
             pyautogui.moveTo(screen_x, screen_y, duration=random.uniform(0.2, 0.3))
             time.sleep(0.05)
 
-            cast_power = self.get_random_power()
+            cast_power = float(power) if power is not None else float(self.get_random_power())
 
             pyautogui.mouseUp(button="left")
             time.sleep(0.02)

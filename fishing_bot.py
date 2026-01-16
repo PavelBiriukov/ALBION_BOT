@@ -34,6 +34,10 @@ class FishingBot:
         self.float_search_timeout = 5     # Через сколько секунд перезабросить (5 сек)
         self.max_retry_attempts = 3       # Максимальное количество попыток перезаброса
         self.retry_count = 0              # Счетчик попыток
+        self.float_search_radius = 220    # Радиус быстрого поиска поплавка (пиксели)
+        self.fast_red_window = 3.0        # Окно ускоренного поиска после заброса (сек)
+        self.water_roi_margin = 50        # Отступ для ROI воды (пиксели)
+        self.last_water_contour = None
         
         # Инициализируем кастер
         self.caster = FishingCaster()
@@ -75,77 +79,18 @@ class FishingBot:
         except:
             return False
     def grab(self, fast=False):
-        
         if self.skip_frames > 0:
             self.skip_frames -= 1
             time.sleep(0.03)
             return None
-
-        if fast:
-            try:
-                img = self.sct.grab(self.game_region)
-                return cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
-            except:
-                return None
-        """Захват экрана с автоматическим восстановлением при ошибках"""
-        if self.skip_frames > 0:
-            self.skip_frames -= 1
-            time.sleep(0.03)
+        try:
+            img = self.sct.grab(self.game_region)
+            return cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
+        except:
             return None
-        
-        # Пробуем несколько методов захвата
-        for attempt in range(3):
-            try:
-                # Метод 1: MSS с упрощенным регионом
-                try:
-                    safe_region = {
-                        "left": self.region["left"] + 100,  # Смещаем от края
-                        "top": self.region["top"] + 100,
-                        "width": min(self.region["width"] - 200, 1200),
-                        "height": min(self.region["height"] - 200, 800),
-                    }
-                    
-                    img = self.sct.grab(safe_region)
-                    img_array = np.array(img)
-                    
-                    if img_array is not None and img_array.size > 0:
-                        return cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
-                except:
-                    pass
-                
-                # Метод 2: PyAutoGUI как запасной вариант
-                try:
-                    screenshot = pyautogui.screenshot()
-                    img_array = np.array(screenshot)
-                    if img_array is not None and img_array.size > 0:
-                        return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                except:
-                    pass
-                
-                # Метод 3: Попробовать полный экран
-                try:
-                    img = self.sct.grab(self.sct.monitors[0])
-                    img_array = np.array(img)
-                    if img_array is not None and img_array.size > 0:
-                        return cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
-                except:
-                    pass
-                
-            except Exception as e:
-                if attempt == 2:  # Последняя попытка
-                    # Восстанавливаем MSS соединение
-                    try:
-                        self.sct = mss.mss()
-                    except:
-                        pass
-                    time.sleep(0.1)
-                continue
-            
-        return None
 
     def crop_game_area(self, frame):
-        h, w, _ = frame.shape
-        return frame[150:h - 200, 100:w - 0]
+        return frame
 
     def detect_water(self, frame):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -169,9 +114,31 @@ class FishingBot:
 
         return cnt
     
-    def fast_detect_red(self, frame):
+    def fast_detect_red(self, frame, roi=None, mask=None):
         """Очень быстрый поиск красного без контуров"""
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        x_offset = 0
+        y_offset = 0
+        roi_frame = frame
+        roi_mask = mask
+
+        if roi is not None:
+            x1, y1, x2, y2 = roi
+            if x2 <= x1 or y2 <= y1:
+                return None
+            roi_frame = frame[y1:y2, x1:x2]
+            x_offset = x1
+            y_offset = y1
+            if roi_mask is not None:
+                roi_mask = roi_mask[y1:y2, x1:x2]
+
+        scale = 1.0
+        if roi_frame.shape[0] > 400 or roi_frame.shape[1] > 400:
+            scale = 0.5
+            roi_frame = cv2.resize(roi_frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            if roi_mask is not None:
+                roi_mask = cv2.resize(roi_mask, (roi_frame.shape[1], roi_frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
 
         lower_red1 = np.array([0, 120, 70])
         upper_red1 = np.array([10, 255, 255])
@@ -181,12 +148,81 @@ class FishingBot:
         mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
         mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask = cv2.bitwise_or(mask1, mask2)
+        if roi_mask is not None:
+            mask = cv2.bitwise_and(mask, roi_mask)
 
         ys, xs = np.where(mask > 0)
         if len(xs) == 0:
             return None
 
-        return (int(xs.mean()), int(ys.mean()))
+        center_x = int(xs.mean() / scale) + x_offset
+        center_y = int(ys.mean() / scale) + y_offset
+        return (center_x, center_y)
+
+    def get_float_search_roi(self, frame_shape):
+        """ROI для ускоренного поиска поплавка рядом с последней точкой заброса."""
+        if not self.caster.last_cast_points:
+            return None
+
+        last_point = self.caster.last_cast_points[-1]
+        if last_point is None:
+            return None
+
+        height, width = frame_shape[:2]
+        radius = self.float_search_radius
+        x1 = max(int(last_point[0] - radius), 0)
+        y1 = max(int(last_point[1] - radius), 0)
+        x2 = min(int(last_point[0] + radius), width)
+        y2 = min(int(last_point[1] + radius), height)
+
+        return (x1, y1, x2, y2)
+
+    def get_water_search_mask(self, frame_shape):
+        """ROI и маска воды для ускоренного поиска."""
+        if self.last_water_contour is None:
+            return None, None
+
+        x, y, w, h = cv2.boundingRect(self.last_water_contour)
+        height, width = frame_shape[:2]
+        margin = self.water_roi_margin
+        x1 = max(x - margin, 0)
+        y1 = max(y - margin, 0)
+        x2 = min(x + w + margin, width)
+        y2 = min(y + h + margin, height)
+
+        if x2 <= x1 or y2 <= y1:
+            return None, None
+
+        contour = self.last_water_contour.astype(np.int32)
+        contour[:, 0, 0] -= x1
+        contour[:, 0, 1] -= y1
+        mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+
+        return (x1, y1, x2, y2), mask
+
+    def get_fast_search_roi(self, frame_shape):
+        """Возвращает ROI и маску для ускоренного поиска поплавка."""
+        cast_roi = self.get_float_search_roi(frame_shape)
+        water_roi, water_mask = self.get_water_search_mask(frame_shape)
+
+        if cast_roi and water_roi:
+            x1 = max(cast_roi[0], water_roi[0])
+            y1 = max(cast_roi[1], water_roi[1])
+            x2 = min(cast_roi[2], water_roi[2])
+            y2 = min(cast_roi[3], water_roi[3])
+            if x2 <= x1 or y2 <= y1:
+                return cast_roi, None
+            roi = (x1, y1, x2, y2)
+            if water_mask is None:
+                return roi, None
+            return roi, water_mask[y1 - water_roi[1]:y2 - water_roi[1], x1 - water_roi[0]:x2 - water_roi[0]]
+
+        if cast_roi:
+            return cast_roi, None
+        if water_roi:
+            return water_roi, water_mask
+        return None, None
     
     def detect_red_in_water(self, frame, water_contour):
         water_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -245,8 +281,8 @@ class FishingBot:
         
         try:
             center_x, center_y, w, h = red_position
-            screen_x = self.region["left"] + 100 + center_x
-            screen_y = self.region["top"] + 150 + center_y
+            screen_x = self.game_region["left"] + center_x
+            screen_y = self.game_region["top"] + center_y
             
             pyautogui.moveTo(screen_x, screen_y, duration=0.01)
             return (screen_x, screen_y)  # Возвращаем экранные координаты
@@ -362,7 +398,7 @@ class FishingBot:
         elif self.state == "CASTING":
             if current_time - self.last_cast_time > 0.5:
                 print("🎣 Выполняю заброс...")
-                if self.caster.simple_cast(self.region):
+                if self.caster.simple_cast(self.region, game_region=self.game_region):
                     print("✅ Заброс выполнен успешно")
                     self.state = "WAITING_FLOAT"
                     self.last_cast_time = current_time
@@ -383,8 +419,9 @@ class FishingBot:
             time_since_cast = current_time - self.last_cast_time
 
             red_found = False
-            if time_since_cast < 1.5:
-                fast_red = self.fast_detect_red(frame)
+            if time_since_cast < self.float_search_timeout:
+                search_roi, search_mask = self.get_fast_search_roi(frame.shape)
+                fast_red = self.fast_detect_red(frame, roi=search_roi, mask=search_mask)
                 if fast_red:
                     red_found = True
                     # сохраняем позицию поплавка (в координатах кадра)
@@ -483,7 +520,6 @@ class FishingBot:
         while True:
             if not paused:
                 frame = self.grab()
-                frame = self.crop_game_area(frame)
                 debug = frame.copy()
                 
                 water_area_display = np.zeros_like(frame)
@@ -496,6 +532,7 @@ class FishingBot:
                 if water is not None:
                     # Обновляем кастер
                     self.caster.set_water_contour(water)
+                    self.last_water_contour = water
                     
                     # Отображаем воду
                     cv2.drawContours(water_area_display, [water], -1, (100, 100, 255), -1)
@@ -506,8 +543,9 @@ class FishingBot:
                     time_since_cast = time.time() - self.last_cast_time
                     red_mask = None
 
-                    if time_since_cast < 1.5:
-                        fast_red = self.fast_detect_red(frame)
+                    if time_since_cast < self.fast_red_window:
+                        search_roi, search_mask = self.get_fast_search_roi(frame.shape)
+                        fast_red = self.fast_detect_red(frame, roi=search_roi, mask=search_mask)
                         if fast_red:
                             red_position = (fast_red[0], fast_red[1], 8, 8)
                             self.red_position = red_position
@@ -520,7 +558,11 @@ class FishingBot:
                             if self.state == "WAITING_FLOAT":
                                 self.state = "TRACKING_FLOAT"
                                 self.float_found_time = time.time()
-
+                        else:
+                            reds, red_mask = self.detect_red_in_water(frame, water)
+                            if reds:
+                                red_position = self.get_main_red_position(reds)
+                                self.red_position = red_position
                     else:
                         reds, red_mask = self.detect_red_in_water(frame, water)
                         if reds:
@@ -598,8 +640,8 @@ class FishingBot:
                         # Рисуем круг дистанции
                         if self.float_initial_position:
                             # Преобразуем экранные координаты обратно в координаты кадра
-                            frame_x = self.float_initial_position[0] - self.region["left"] - 100
-                            frame_y = self.float_initial_position[1] - self.region["top"] - 150
+                            frame_x = self.float_initial_position[0] - self.game_region["left"]
+                            frame_y = self.float_initial_position[1] - self.game_region["top"]
                             
                             # Рисуем начальную точку
                             cv2.circle(debug, (int(frame_x), int(frame_y)), 
@@ -611,8 +653,8 @@ class FishingBot:
                             
                             # Рисуем линию до текущей позиции
                             if self.float_current_position:
-                                current_frame_x = self.float_current_position[0] - self.region["left"] - 100
-                                current_frame_y = self.float_current_position[1] - self.region["top"] - 150
+                                current_frame_x = self.float_current_position[0] - self.game_region["left"]
+                                current_frame_y = self.float_current_position[1] - self.game_region["top"]
                                 cv2.line(debug, (int(frame_x), int(frame_y)),
                                         (int(current_frame_x), int(current_frame_y)),
                                         (255, 255, 0), 2)

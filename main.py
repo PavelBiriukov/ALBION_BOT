@@ -65,7 +65,6 @@ def run_fishing_session():
                     time.sleep(0.2)
                     continue
                     
-                frame = bot.crop_game_area(frame)
                 water = bot.detect_water(frame)
                 
                 if water is not None:
@@ -82,10 +81,8 @@ def run_fishing_session():
                     time.sleep(0.2)
                     continue
 
-                frame = bot.crop_game_area(frame)
-
                 # Передаем кадр для анализа глубоких мест
-                if caster.smart_cast(bot.region, frame):
+                if caster.smart_cast(bot.region, frame, game_region=bot.game_region):
                     bot.reset_tracking()
                     bot.float_found_time = time.time()
                     last_cast_time = time.time()
@@ -103,7 +100,6 @@ def run_fishing_session():
                     time.sleep(0.2)
                     continue
                     
-                frame = bot.crop_game_area(frame)
                 water = bot.detect_water(frame)
                 
                 if water is None:
@@ -142,7 +138,6 @@ def run_fishing_session():
                     time.sleep(0.2)
                     continue
                     
-                frame = bot.crop_game_area(frame)
                 water = bot.detect_water(frame)
                 
                 if water is None:
