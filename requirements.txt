@@ -1,6 +1,0 @@
-mss
-opencv-python
-numpy
-pyautogui
-pynput
-toml
